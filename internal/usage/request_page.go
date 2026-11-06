@@ -724,12 +724,13 @@ type requestIndex struct {
 	// pairs are the last pairing of each of a few periods (pairMemo),
 	// kept as parts are
 	pairs map[Period]*pairMemo
-	// on are the paths the last read listed; unsaved counts the chunks
-	// made since the file of them was last written (toDisk), and saving
-	// says a write is under way; unsavedRows counts their rows, and
-	// savedRows says a write was made for them (once a run)
+	// on are the paths the last read listed; dirty are the session files
+	// whose chunk was made since the file of them was last written
+	// (toDisk), and saving says a write is under way; unsavedRows counts
+	// their rows, and savedRows says a write was made for them (once a
+	// run)
 	on          map[string]bool
-	unsaved     int
+	dirty       map[string]struct{}
 	unsavedRows int
 	saving      bool
 	savedRows   bool
@@ -1111,9 +1112,10 @@ type requestBlocks struct {
 	gateways, chunks, others []*rowChunk
 	on                       map[string]bool
 	priced                   *blockPricer
-	// built counts the session files' chunks made again, and builtRows
-	// their rows
-	built, builtRows int
+	// built are the session files whose chunk was made again, which
+	// builtRows counts the rows of
+	built     []string
+	builtRows int
 }
 
 // readRequestBlocks reads the blocks of p at now into idx, a private copy
@@ -1211,7 +1213,7 @@ func readRequestBlocks(idx *requestIndex, st requestState, p Period, now, settle
 		idx.fromDisk(want)
 		spill = newArchiveSpill()
 	}
-	built, builtRows := 0, 0
+	built, builtRows := []string{}, 0
 	// A file's rows are made by the reader that read it: made one after
 	// another, they were most of a cold build's wait (#3493).
 	makeChunk := func() func(sessions.CallSource) *rowChunk {
@@ -1252,7 +1254,7 @@ func readRequestBlocks(idx *requestIndex, st requestState, p Period, now, settle
 		if reused := c != nil && c.Source.Size == s.Size && c.Source.Modified.Equal(s.Modified); !reused {
 			c = read(i)
 			c.serial = sourceSerial(st.root, st.meta, s)
-			built++
+			built = append(built, s.Path)
 			builtRows += c.Count
 			c.used = useAt(idx.tick)
 			put = spill.put(c, i)
@@ -1458,20 +1460,28 @@ func (idx *requestIndex) keep(read *requestIndex, on map[string]bool) bool {
 	return true
 }
 
-// noteBuilt counts the chunks b made, and writes the file of them once
-// they are requestDiskLeast or more (a first read of the history): fewer
-// are a few shard reads at the next start, and not worth writing the
-// whole file (~44MB for 15.6k sessions) again. Or once a run, when they
-// hold requestDiskLeastRows rows: a few long sessions that ended since
-// the last write (9 files, 84.6k calls, ~1s) were made again at every
-// start, and the next ones that end joined them, until they were
-// requestDiskLeast files. Once, as a session still at work grows with
-// every call and is made again for each. idx is locked.
+// noteBuilt counts the session files b made chunks of again, and writes
+// the file of them once they are requestDiskLeast or more (a first read of
+// the history): fewer are a few shard reads at the next start, and not
+// worth writing the whole file (~44MB for 15.6k sessions) again. Counting
+// the files rather than the chunks made is what keeps one session still at
+// work, made again at every page, from writing the whole file again and
+// again (#4276: 97.4 MB in 96 seconds over a 24 MB cache). Or once a run,
+// when they hold requestDiskLeastRows rows: a few long sessions that ended
+// since the last write (9 files, 84.6k calls, ~1s) were made again at
+// every start, and the next ones that end joined them, until they were
+// requestDiskLeast files, and not again for the rows of a session still at
+// work, made again at every page. idx is locked.
 func (idx *requestIndex) noteBuilt(b requestBlocks) {
 	idx.on = b.on
-	idx.unsaved += b.built
+	if idx.dirty == nil {
+		idx.dirty = make(map[string]struct{}, len(b.built))
+	}
+	for _, path := range b.built {
+		idx.dirty[path] = struct{}{}
+	}
 	idx.unsavedRows += b.builtRows
-	if idx.unsaved >= requestDiskLeast {
+	if len(idx.dirty) >= requestDiskLeast {
 		idx.save()
 	} else if !idx.savedRows && idx.unsavedRows >= requestDiskLeastRows {
 		idx.savedRows = true
@@ -1496,7 +1506,7 @@ func (idx *requestIndex) save() {
 		return
 	}
 	idx.saving = true
-	idx.unsaved, idx.unsavedRows = 0, 0 // a write that fails is tried again only for new chunks
+	idx.dirty, idx.unsavedRows = nil, 0 // a write that fails is tried again only for new chunks
 	root, meta, chunks, on := idx.root, idx.meta, maps.Clone(idx.chunks), idx.on
 	requestDiskSaves.Add(1)
 	go func() {
