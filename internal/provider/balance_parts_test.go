@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,5 +77,49 @@ func TestBalanceParts(t *testing.T) {
 		if q.Provider == "one" && !q.ReadAt.Equal(first) {
 			t.Errorf("one: kept, it says read at %v, not %v", q.ReadAt, first)
 		}
+	}
+}
+
+// A part of a balance field ending in "@" is a time (readBalanceTime): a
+// Unix time in seconds or in milliseconds, RFC 3339 text or a date alone,
+// shown as its date — today's as its time of day — instead of as an amount
+// of 1796832000000.00. skygunner's #3011 and hong65201's #5660 asked for
+// it: a panel's resets_at came to the card as a number.
+func TestBalanceFieldTime(t *testing.T) {
+	body := []byte(`{"quota":{"resetsAt":1796832000,"resetsMs":1796832000000,"text":"2026-12-10T00:00:00+08:00","day":"2026-12-10"},"n":5}`)
+	local := time.Date(2026, 12, 10, 0, 0, 0, 0, time.Local)
+	if local.Month() != 12 || local.Day() != 10 {
+		t.Fatalf("the fixture's date: %v", local)
+	}
+	for _, c := range []struct{ path, want string }{
+		{"quota.resetsAt@", "Dec 10"},
+		{"quota.resetsMs@", "Dec 10"},
+		{"quota.text@", "Dec 10"},
+		{"quota.day@", "Dec 10"},
+		{"重置: quota.resetsAt@; n: n", "重置 Dec 10 · n 5.00"},
+	} {
+		if got, err := readBalancePath(body, c.path); err != nil || got != c.want {
+			t.Errorf("%q: %q %v, want %q", c.path, got, err, c.want)
+		}
+	}
+	// today's is its time of day: what a card has room for
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 9, 30, 0, 0, time.Local)
+	if got, err := readBalancePath([]byte(`{"t":`+strconv.FormatInt(today.Unix(), 10)+`}`), "t@"); err != nil || got != "09:30" {
+		t.Errorf("today: %q %v, want 09:30", got, err)
+	}
+	// a time the reply hasn't is "—" as an amount is, and the others show
+	parts, err := readBalanceParts(body, "at: quota.nope@; n: n")
+	if err != nil || len(parts) != 2 || parts[0].Text != "—" || parts[1].Text != "5.00" {
+		t.Errorf("parts: %+v %v", parts, err)
+	}
+	// a number that isn't a time, or text that isn't a date, says so
+	for _, path := range []string{"n@", "quota.day@x", "@"} {
+		if got, err := readBalancePath(body, path); err == nil {
+			t.Errorf("%q: read %q, want an error", path, got)
+		}
+	}
+	if _, err := readBalancePath([]byte(`{"d":"not a date"}`), "d@"); err == nil || !strings.Contains(err.Error(), "not a date") {
+		t.Errorf("text: %v", err)
 	}
 }

@@ -747,7 +747,9 @@ func readAiHubMixAccount(b []byte) (string, error) {
 // wanted, go apart by ";" and are shown together: "5h: windowLimits.
 // fiveHour.used / windowLimits.fiveHour.cap %; week: …; $credits.
 // monthlyCredits" is "5h 0% · week 3.4% · $70.00"; one of them the reply
-// hasn't is "—" while the others show.
+// hasn't is "—" while the others show. A part ending in "@" is a time
+// (readBalanceTime): a Unix time in seconds or milliseconds, or a date in
+// RFC 3339, shown as its date: "重置: quota.ResetsAt@".
 func readBalancePath(b []byte, path string) (string, error) {
 	parts, err := readBalanceParts(b, path)
 	if err != nil {
@@ -834,9 +836,14 @@ func readBalanceParts(b []byte, path string) ([]BalancePart, error) {
 }
 
 // readBalanceOne is one amount of a balance path, and its share in percent
-// when it was asked as one.
+// when it was asked as one; a path ending in "@" is a time, not an amount.
 func readBalanceOne(b []byte, path string) (string, *float64, error) {
 	path = strings.TrimSpace(path)
+	if rest, ok := strings.CutSuffix(path, "@"); ok {
+		// a time rather than a number: the same dotted path, read as one
+		v, err := readBalanceTime(b, strings.TrimSpace(rest))
+		return v, nil, err
+	}
 	sign := ""
 	for _, s := range []string{"$", "¥", "€", "£"} {
 		if rest, ok := strings.CutPrefix(path, s); ok {
@@ -878,6 +885,77 @@ func readBalanceOne(b []byte, path string) (string, *float64, error) {
 		return "", nil, fmt.Errorf("the balance path divides by nothing")
 	}
 	return balanceAmount(sign, n, percent), balanceShare(n, percent), nil
+}
+
+// readBalanceTime is what a balance field's part ending in "@" shows of the
+// reply, at the dotted path it names: a time. It is a Unix time in seconds
+// (or in milliseconds, when it is past 1e11), a number or a string of one,
+// or a date in RFC 3339 or in a date alone; it shows as its date and, in
+// the day it falls on, the time of day too, on this computer's clock.
+// A field time still ahead is worth naming as a reset; anything the reply
+// hasn't, or can't be read as a time, fails as an amount does.
+func readBalanceTime(b []byte, path string) (string, error) {
+	if path == "" {
+		return "", errors.New(`a time needs a path before its "@", e.g. quota.resetsAt@`)
+	}
+	var reply any
+	if err := json.Unmarshal(b, &reply); err != nil {
+		return "", errors.New("the reply is not JSON")
+	}
+	e := &balanceExpr{src: path, reply: reply}
+	v, err := e.at(path)
+	if err != nil {
+		return "", err
+	}
+	t, err := balanceClock(v)
+	if err != nil {
+		return "", fmt.Errorf("%q in the reply is not a time: %w", path, err)
+	}
+	now := time.Now()
+	if t.Year() == now.Year() {
+		if t.Month() == now.Month() && t.Day() == now.Day() {
+			return t.Format("15:04"), nil
+		}
+		return t.Format("Jan 2"), nil
+	}
+	return t.Format("Jan 2 2006"), nil
+}
+
+// balanceClock reads v as a time: a Unix time in seconds, or milliseconds
+// past 1e11, a number or a string of one; or RFC 3339 text, or a date alone
+// (2026-12-10), which is midnight local.
+func balanceClock(v any) (time.Time, error) {
+	if s, ok := v.(string); ok {
+		s = strings.TrimSpace(s)
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return unixClock(f)
+		}
+		for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02"} {
+			if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+				return t, nil
+			}
+		}
+		return time.Time{}, fmt.Errorf("%q is not a date", s)
+	}
+	if n, ok := number(v); ok {
+		return unixClock(n)
+	}
+	return time.Time{}, errors.New("not a date or a number")
+}
+
+// unixClock is a Unix time in seconds, or in milliseconds when it is past
+// 1e11 (year 5138 in seconds), as this computer's clock. A number too small
+// to be a time (a count of 5, the epoch itself) is refused rather than
+// shown as 1970: a field naming a time names one ahead.
+func unixClock(f float64) (time.Time, error) {
+	if f != f || math.IsInf(f, 0) || f < 1e9 {
+		return time.Time{}, errors.New("not a time")
+	}
+	// 1e11 seconds is year 5138; past it the figure is milliseconds
+	if f >= 1e11 {
+		return time.UnixMilli(int64(f)).In(time.Local), nil
+	}
+	return time.Unix(int64(f), 0).In(time.Local), nil
 }
 
 // balanceShare is an amount asked as a percent, 0.25 as 25; nil for one

@@ -3299,7 +3299,7 @@ you press *Add*. `magpie import <link>` does the same in a terminal.
 | `website`, `keys` | the vendor's site and its API-key page (https)               |
 | `icon`      | an https picture of the vendor's own (PNG, JPEG, GIF, WebP, ICO, SVG, at most 1 MB). magpie downloads it once, after you confirm the import, into its icons folder; without one it falls back to the catalog's logo or a plain mark |
 | `balance`   | where the key's balance is read (https), on the host of one of the base URLs, asked with the key; `{key}` in it stands for the key. Without it magpie reads the vendors it knows and asks a relay new-api's and sub2api's balance paths |
-| `balance_path` | where the amount is in the JSON reply (`data.balance`, `$ data.quota / 500000`, `;` between several); needs `balance` |
+| `balance_path` | where the amount is in the JSON reply (`data.balance`, `$ data.quota / 500000`, `;` between several); a part ending in `@` is a time, not an amount: a Unix time in seconds or milliseconds, or a date, shown as its date (`重置: quota.resetsAt@`); needs `balance` |
 | `balance_method` | `GET` (the default) or `POST` with no body; needs `balance` |
 
 Base URLs must be https (plain http only to this machine or the local

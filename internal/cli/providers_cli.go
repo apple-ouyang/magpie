@@ -196,6 +196,8 @@ const providerUsage = `usage:
                                     billing=auto goes back to magpie's reading of its endpoints)
        magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'
        magpie provider set my-relay balance.path='(1 - credits.monthlyCredits / 70) %'
+       magpie provider set my-relay balance.path='剩余: $left; 重置: quota.resetsAt@'
+                                   (a part ending in "@" is a time, not an amount: Unix seconds or milliseconds, or a date, shown as its date)
        magpie provider set my-relay balance.method=POST
                                    (a balance endpoint that answers only a POST: asked with no body)
        magpie provider set my-relay balance=https://relay.example.com/api/user/self balance.path='$data.quota / 500000' balance.token=<access token> header.New-Api-User=<user id>
